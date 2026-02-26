@@ -1,0 +1,420 @@
+# Microkit - Шпаргалка
+
+## Установка
+
+```bash
+# Установить CLI
+go install github.com/yourorg/microkit/cmd/microkit-cli@latest
+
+# Проверить версию
+microkit --version
+```
+
+## Создание проекта
+
+```bash
+# Новый проект
+microkit init my-service
+
+# С кастомным module path
+microkit init my-service --module github.com/myorg/my-service
+
+# Перейти в проект
+cd my-service && go mod tidy
+```
+
+## Генерация компонентов
+
+```bash
+# Entity
+microkit generate entity user
+microkit gen entity product        # короткая форма
+
+# Repository (интерфейс + реализация)
+microkit generate repository user
+microkit g repository product      # ещё короче
+
+# Use Case
+microkit generate usecase create-user
+microkit g usecase get-user
+
+# Handler
+microkit generate handler user
+microkit g handler product
+```
+
+## Структура проекта
+
+```
+my-service/
+├── cmd/api/main.go              # Точка входа
+├── internal/
+│   ├── domain/
+│   │   ├── entity/              # Бизнес-сущности
+│   │   └── repository/          # Интерфейсы
+│   ├── usecase/                 # Бизнес-логика
+│   ├── delivery/http/           # HTTP handlers
+│   └── infrastructure/repository/ # Реализации
+├── config/config.yaml           # Конфигурация
+└── locales/                     # i18n переводы
+    ├── en.yaml
+    └── ru.yaml
+```
+
+## Make команды
+
+```bash
+make run          # Запустить сервер
+make build        # Собрать бинарник
+make test         # Запустить тесты
+make lint         # Проверить код
+make clean        # Очистить
+```
+
+## Конфигурация
+
+### config/config.yaml
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8080
+
+logger:
+  level: info          # debug, info, warn, error
+  format: json         # json, console
+
+tracing:
+  enabled: true
+  service_name: my-service
+  endpoint: http://localhost:14268/api/traces
+
+i18n:
+  default_language: en
+  supported_languages: [en, ru]
+  path: ./locales
+```
+
+### Переменные окружения
+
+```bash
+export APP_SERVER_PORT=3000
+export APP_LOGGER_LEVEL=debug
+export APP_TRACING_ENABLED=true
+```
+
+## Dependency Injection (FX)
+
+```go
+// main.go
+fx.New(
+    fx.Provide(
+        provideConfig,
+        logger.New,
+        repository.NewUserRepository,
+        usecase.NewCreateUserUsecase,
+        http.NewUserHandler,
+    ),
+    fx.Invoke(
+        setupServer,
+        registerRoutes,
+    ),
+)
+```
+
+## HTTP Handler
+
+```go
+func (h *Handler) Create(c *fiber.Ctx) error {
+    ctx := c.UserContext()
+
+    // Парсинг
+    var input Input
+    if err := c.BodyParser(&input); err != nil {
+        return server.SendError(c, errors.ErrBadRequest)
+    }
+
+    // Use Case
+    result, err := h.usecase.Execute(ctx, input)
+    if err != nil {
+        return server.SendError(c, err)
+    }
+
+    // Ответ
+    return server.SendCreated(c, result)
+}
+```
+
+## Use Case
+
+```go
+func (u *Usecase) Execute(ctx context.Context, input Input) error {
+    ctx, span := u.tracer.Start(ctx, "Usecase.Execute")
+    defer span.End()
+
+    u.logger.Info("Executing")
+
+    // Бизнес-логика
+    entity := &Entity{...}
+    entity.Validate()
+
+    // Repository
+    return u.repo.Create(ctx, entity)
+}
+```
+
+## Repository
+
+```go
+// Интерфейс (domain/repository)
+type UserRepository interface {
+    Create(ctx context.Context, user *entity.User) error
+    GetByID(ctx context.Context, id string) (*entity.User, error)
+}
+
+// Реализация (infrastructure/repository)
+func (r *repo) Create(ctx context.Context, user *entity.User) error {
+    return r.db.Create(user).Error
+}
+```
+
+## Ответы HTTP
+
+```go
+// Успех
+server.SendSuccess(c, data)
+
+// С метаданными (пагинация)
+meta := server.CalculateMeta(page, perPage, total)
+server.SendSuccessWithMeta(c, data, meta)
+
+// Создано (201)
+server.SendCreated(c, data)
+
+// Нет контента (204)
+server.SendNoContent(c)
+
+// Ошибка
+server.SendError(c, err)
+```
+
+## Ошибки
+
+```go
+// Встроенные
+errors.ErrBadRequest
+errors.ErrNotFound
+errors.ErrUnauthorized
+errors.ErrInternal
+
+// С деталями
+errors.ErrValidation.WithDetails(map[string]interface{}{
+    "field": "email",
+    "error": "invalid format",
+})
+
+// Обёртка
+errors.Wrap(err, "code", "message", statusCode)
+
+// Кастомная
+var ErrUserExists = errors.New(
+    "user_exists",
+    "User already exists",
+    http.StatusConflict,
+)
+```
+
+## Логирование
+
+```go
+logger.Info("Message",
+    logger.String("key", "value"),
+    logger.Int("count", 42),
+)
+
+logger.Error("Error occurred", logger.Error(err))
+
+// С контекстом
+logger.WithTraceID(traceID).Info("Message")
+logger.WithFields(zap.String("user", id)).Info("Message")
+```
+
+## Трассировка
+
+```go
+// Создать span
+ctx, span := tracer.Start(ctx, "Operation")
+defer span.End()
+
+// Добавить атрибуты
+tracer.SetAttributes(ctx,
+    attribute.String("key", "value"),
+)
+
+// Записать событие
+tracer.AddEvent(ctx, "event_name")
+
+// Записать ошибку
+tracer.RecordError(ctx, err)
+```
+
+## i18n
+
+```go
+// В handler
+lang := middleware.GetLanguage(c)
+message := i18n.T(lang, "key", nil)
+
+// С параметрами
+message := i18n.T(lang, "greeting", map[string]interface{}{
+    "Name": "John",
+})
+```
+
+### locales/en.yaml
+
+```yaml
+greeting:
+  other: "Hello, {{.Name}}!"
+
+error:
+  not_found: "Not found"
+```
+
+## Middleware
+
+```go
+// В setupServer
+app.Use(middleware.CORSMiddleware(middleware.DefaultCORSConfig()))
+app.Use(middleware.RateLimitMiddleware(middleware.DefaultRateLimitConfig()))
+app.Use(middleware.TracingMiddleware(tracer))
+app.Use(middleware.LoggerMiddleware(log))
+app.Use(middleware.I18nMiddleware(i18n))
+```
+
+## API Endpoints (пример)
+
+```bash
+# Health check
+GET /health
+
+# CRUD
+GET    /api/v1/users
+GET    /api/v1/users/:id
+POST   /api/v1/users
+PUT    /api/v1/users/:id
+DELETE /api/v1/users/:id
+
+# С фильтрами
+GET /api/v1/users?page=1&per_page=10&completed=true
+
+# С языком
+GET /api/v1/users?lang=ru
+# или
+curl -H "Accept-Language: ru" /api/v1/users
+```
+
+## Тестирование
+
+```bash
+# Все тесты
+go test ./...
+
+# С coverage
+go test -cover ./...
+
+# Конкретный пакет
+go test ./internal/usecase
+
+# Verbose
+go test -v ./...
+```
+
+## Docker
+
+```bash
+# Сборка
+docker build -t my-service .
+
+# Запуск
+docker run -p 8080:8080 my-service
+
+# С env переменными
+docker run -p 8080:8080 \
+  -e APP_LOGGER_LEVEL=debug \
+  my-service
+```
+
+## Jaeger (Tracing)
+
+```bash
+# Запустить
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 14268:14268 \
+  jaegertracing/all-in-one:latest
+
+# UI
+open http://localhost:16686
+```
+
+## Полезные команды
+
+```bash
+# Форматирование
+go fmt ./...
+
+# Линтер
+golangci-lint run
+
+# Обновить зависимости
+go mod tidy
+
+# Vendor
+go mod vendor
+
+# Очистить кеш
+go clean -cache
+```
+
+## Чеклист нового модуля
+
+- [ ] `microkit generate entity [name]`
+- [ ] Реализовать Validate() в entity
+- [ ] `microkit generate repository [name]`
+- [ ] Реализовать методы repository
+- [ ] `microkit generate usecase [name]`
+- [ ] Реализовать бизнес-логику в use case
+- [ ] `microkit generate handler [name]`
+- [ ] Реализовать endpoints в handler
+- [ ] Зарегистрировать в main.go (fx.Provide)
+- [ ] Зарегистрировать routes в registerRoutes
+- [ ] Добавить i18n переводы
+- [ ] Написать тесты
+
+## Типичные проблемы
+
+### Port уже занят
+
+```bash
+lsof -i :8080
+kill -9 <PID>
+```
+
+### Зависимости не обновляются
+
+```bash
+go clean -modcache
+go mod tidy
+```
+
+### FX не может найти зависимость
+
+Проверьте, что все провайдеры зарегистрированы в `fx.Provide()`
+
+## Ресурсы
+
+- [Документация](README.md)
+- [Быстрый старт](QUICKSTART.md)
+- [Архитектура](ARCHITECTURE.md)
+- [Примеры](examples/)
